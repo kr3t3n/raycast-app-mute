@@ -18,7 +18,7 @@
     "agent:diagnose": "./helper/scripts/diagnose.sh"
   },
   "dependencies": {
-    "@raycast/api": "^1.96.0",
+    "@raycast/api": "^2.2.0",
     "@raycast/utils": "^1.17.0"
   },
   "devDependencies": {
