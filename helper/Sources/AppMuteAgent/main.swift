@@ -47,7 +47,6 @@ func findRunningApp(request: Request) -> RunningApp? {
     let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     return apps.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
   }
-  // Soft name match for diagnose/CLI (e.g. appId=ClickUp).
   for key in candidates {
     if let match = apps.first(where: { $0.name.caseInsensitiveCompare(key) == .orderedSame }) {
       return match
@@ -59,8 +58,77 @@ func findRunningApp(request: Request) -> RunningApp? {
   return nil
 }
 
+func findRunningApp(target: MuteArming.Target) -> RunningApp? {
+  let apps = AppDiscovery.runningApps()
+  if let match = apps.first(where: { $0.bundleID == target.bundleID || $0.id == target.key || $0.path == target.path }) {
+    return match
+  }
+  return apps.first { $0.name.caseInsensitiveCompare(target.name) == .orderedSame }
+}
+
 func registryKey(for app: RunningApp) -> String {
   app.bundleID ?? app.id
+}
+
+func armTarget(for app: RunningApp, key: String) -> MuteArming.Target {
+  MuteArming.Target(
+    key: key,
+    name: app.name,
+    bundleID: app.bundleID,
+    path: app.path,
+    pid: app.pid
+  )
+}
+
+func markMenuMuted(key: String, name: String) {
+  DispatchQueue.main.async {
+    MenuBarController.shared.setMuted(key: key, name: name)
+  }
+}
+
+func markMenuUnmuted(key: String) {
+  DispatchQueue.main.async {
+    MenuBarController.shared.setUnmuted(key: key)
+  }
+}
+
+@available(macOS 14.2, *)
+func applyMuteTap(for app: RunningApp, key: String) throws -> Int {
+  let matches = ProcessTapController.matches(for: app)
+  let audioProcesses = ProcessTapController.processObjectIDs(for: app)
+  try AgentRuntimeHolder.shared.taps.mute(appID: key, processObjectIDs: audioProcesses)
+  let pids = Set(matches.map(\.pid))
+  _ = registry.set(key, muted: false, processes: [], now: Date())
+  _ = registry.set(key, muted: true, processes: pids, now: Date())
+  return audioProcesses.count
+}
+
+@available(macOS 14.2, *)
+func reconcileArmedMutes() {
+  let runtime = AgentRuntimeHolder.shared
+  for target in MuteArming.shared.all() {
+    guard let app = findRunningApp(target: target) else { continue }
+    let audioProcesses = ProcessTapController.processObjectIDs(for: app)
+    guard !audioProcesses.isEmpty else { continue }
+
+    let current = runtime.taps.tappedProcessObjectIDs(appID: target.key) ?? []
+    if Set(current) == Set(audioProcesses) { continue }
+
+    do {
+      let count = try applyMuteTap(for: app, key: target.key)
+      AgentLog.info("reconcile.attached", fields: [
+        "key": target.key,
+        "name": target.name,
+        "processCount": count,
+      ])
+      markMenuMuted(key: target.key, name: target.name)
+    } catch {
+      AgentLog.error("reconcile.failed", fields: [
+        "key": target.key,
+        "error": String(describing: error),
+      ])
+    }
+  }
 }
 
 func handle(_ request: Request) -> Data {
@@ -87,8 +155,6 @@ func handle(_ request: Request) -> Data {
     return try! JSONEncoder().encode(Response(code: "OK", message: "Agent is ready.", data: "1"))
 
   case "list":
-    // Keep list cheap and small. Per-app Core Audio matching here was heavy and
-    // produced JSON large enough to truncate on the client.
     let apps = AppDiscovery.runningApps().map { app in
       let key = registryKey(for: app)
       return AppRecord(
@@ -99,7 +165,7 @@ func handle(_ request: Request) -> Data {
         executableName: app.executableName,
         running: true,
         hasAudio: false,
-        muted: registry.records[key] != nil,
+        muted: registry.records[key] != nil || MuteArming.shared.contains(key),
         iconPath: nil
       )
     }
@@ -119,6 +185,7 @@ func handle(_ request: Request) -> Data {
         "path": app.path as Any,
         "pid": app.pid,
       ],
+      "armed": MuteArming.shared.contains(registryKey(for: app)),
       "sessions": runtime.taps.activeSessionSummary(),
       "matched": matches.map { match -> [String: Any] in
         [
@@ -148,20 +215,25 @@ func handle(_ request: Request) -> Data {
       return try! JSONEncoder().encode(response("NOT_RUNNING", "The app is not running."))
     }
     let key = registryKey(for: app)
-    let targetMuted = request.operation == "toggle" ? registry.records[key] == nil : request.muted == true
+    let targetMuted =
+      request.operation == "toggle"
+      ? (registry.records[key] == nil && !MuteArming.shared.contains(key))
+      : request.muted == true
 
     if !targetMuted {
       runtime.taps.unmute(appID: key)
+      MuteArming.shared.disarm(key)
       let code = registry.set(key, muted: false, processes: [], now: Date())
       writeLastAction(["operation": "unmute", "app": app.name, "key": key, "code": code])
-      DispatchQueue.main.async {
-        MenuBarController.shared.setUnmuted(key: key)
-      }
+      markMenuUnmuted(key: key)
       return try! JSONEncoder().encode(response(code, "Unmuted \(app.name)."))
     }
 
     let matches = ProcessTapController.matches(for: app)
     let audioProcesses = ProcessTapController.processObjectIDs(for: app)
+    let target = armTarget(for: app, key: key)
+    MuteArming.shared.arm(target)
+
     writeLastAction([
       "operation": "mute",
       "app": app.name,
@@ -169,6 +241,7 @@ func handle(_ request: Request) -> Data {
       "matchedCount": matches.count,
       "outputtingCount": matches.filter(\.isRunningOutput).count,
       "tappedObjectIDs": audioProcesses,
+      "armed": true,
       "matches": matches.map { match -> [String: Any] in
         [
           "objectID": match.objectID,
@@ -179,44 +252,67 @@ func handle(_ request: Request) -> Data {
       },
     ])
 
-    do {
-      // Clear prior registry state so a recreate reports OK, not ALREADY_MUTED.
+    if audioProcesses.isEmpty {
       _ = registry.set(key, muted: false, processes: [], now: Date())
-      try runtime.taps.mute(appID: key, processObjectIDs: audioProcesses)
-      let pids = Set(matches.map(\.pid))
-      let code = registry.set(key, muted: true, processes: pids, now: Date())
-      let message =
-        "Muted \(app.name) (\(audioProcesses.count) audio process\(audioProcesses.count == 1 ? "" : "es"))."
+      _ = registry.set(key, muted: true, processes: [], now: Date())
+      markMenuMuted(key: key, name: app.name)
       writeLastAction([
         "operation": "mute",
         "app": app.name,
         "key": key,
-        "code": code,
+        "code": "OK",
+        "armed": true,
+        "attached": false,
+      ])
+      return try! JSONEncoder().encode(
+        response("OK", "Muted \(app.name) (armed — will silence when it plays audio).")
+      )
+    }
+
+    do {
+      let count = try applyMuteTap(for: app, key: key)
+      markMenuMuted(key: key, name: app.name)
+      writeLastAction([
+        "operation": "mute",
+        "app": app.name,
+        "key": key,
+        "code": "OK",
+        "armed": true,
+        "attached": true,
         "tappedObjectIDs": audioProcesses,
         "matchedCount": matches.count,
         "outputtingCount": matches.filter(\.isRunningOutput).count,
       ])
-      DispatchQueue.main.async {
-        MenuBarController.shared.setMuted(key: key, name: app.name)
-      }
-      return try! JSONEncoder().encode(response("OK", message))
-    } catch TapError.noAudioSession {
-      writeLastAction(["operation": "mute", "app": app.name, "code": "NO_AUDIO_SESSION", "matchedCount": matches.count])
       return try! JSONEncoder().encode(
-        response("NO_AUDIO_SESSION", "\(app.name) has no audio session. Play sound in the app, then try again.")
+        response("OK", "Muted \(app.name) (\(count) audio process\(count == 1 ? "" : "es")).")
       )
     } catch TapError.rejected(let status) {
-      writeLastAction(["operation": "mute", "app": app.name, "code": "TAP_REJECTED", "status": status])
+      // Keep armed so a later reconcile can attach.
+      _ = registry.set(key, muted: false, processes: [], now: Date())
+      _ = registry.set(key, muted: true, processes: [], now: Date())
+      markMenuMuted(key: key, name: app.name)
+      writeLastAction([
+        "operation": "mute",
+        "app": app.name,
+        "code": "TAP_REJECTED",
+        "status": status,
+        "armed": true,
+      ])
       return try! JSONEncoder().encode(
-        response("TAP_REJECTED", "macOS could not mute \(app.name) (status \(status)).")
+        response("OK", "Muted \(app.name) (armed — tap attach failed, will retry).")
       )
     } catch {
-      writeLastAction(["operation": "mute", "app": app.name, "code": "TAP_REJECTED"])
-      return try! JSONEncoder().encode(response("TAP_REJECTED", "macOS could not mute \(app.name)."))
+      _ = registry.set(key, muted: false, processes: [], now: Date())
+      _ = registry.set(key, muted: true, processes: [], now: Date())
+      markMenuMuted(key: key, name: app.name)
+      return try! JSONEncoder().encode(
+        response("OK", "Muted \(app.name) (armed — will silence when it plays audio).")
+      )
     }
 
   case "stop":
     runtime.taps.releaseAll()
+    MuteArming.shared.disarmAll()
     for key in Array(registry.records.keys) {
       _ = registry.set(key, muted: false, processes: [], now: Date())
     }
@@ -232,12 +328,10 @@ func handle(_ request: Request) -> Data {
 
 func unmuteKey(_ key: String) {
   guard #available(macOS 14.2, *) else { return }
-  let runtime = AgentRuntimeHolder.shared
-  runtime.taps.unmute(appID: key)
+  AgentRuntimeHolder.shared.taps.unmute(appID: key)
+  MuteArming.shared.disarm(key)
   _ = registry.set(key, muted: false, processes: [], now: Date())
-  DispatchQueue.main.async {
-    MenuBarController.shared.setUnmuted(key: key)
-  }
+  markMenuUnmuted(key: key)
   AgentLog.info("menu.unmute", fields: ["key": key])
 }
 
@@ -249,7 +343,7 @@ AgentLog.info("agent.start", fields: [
 NotificationCenter.default.addObserver(
   forName: .appMuteUnmuteRequested,
   object: nil,
-  queue: nil
+  queue: .main
 ) { note in
   guard let key = note.object as? String else { return }
   unmuteKey(key)
@@ -258,9 +352,9 @@ NotificationCenter.default.addObserver(
 NotificationCenter.default.addObserver(
   forName: .appMuteUnmuteAllRequested,
   object: nil,
-  queue: nil
+  queue: .main
 ) { _ in
-  for key in Array(registry.records.keys) {
+  for key in Array(Set(registry.records.keys).union(MuteArming.shared.all().map(\.key))) {
     unmuteKey(key)
   }
 }
@@ -269,8 +363,14 @@ DispatchQueue.global(qos: .userInitiated).async {
   SocketServer(handle: handle).run()
 }
 
-DispatchQueue.main.async {
-  MenuBarController.shared.start()
+if #available(macOS 14.2, *) {
+  Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+    reconcileArmedMutes()
+  }
 }
 
-RunLoop.main.run()
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+MenuBarController.shared.start()
+AgentLog.info("agent.uiReady", fields: [:])
+app.run()

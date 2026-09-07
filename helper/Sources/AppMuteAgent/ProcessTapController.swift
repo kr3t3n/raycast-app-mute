@@ -44,9 +44,14 @@ final class ProcessTapController {
     let aggregateID: AudioObjectID
     let ioProcID: AudioDeviceIOProcID
     let frames: FrameCounter
+    let processObjectIDs: [AudioObjectID]
   }
 
   private var sessions: [String: Session] = [:]
+
+  func tappedProcessObjectIDs(appID: String) -> [AudioObjectID]? {
+    sessions[appID]?.processObjectIDs
+  }
 
   func mute(appID: String, processObjectIDs: [AudioObjectID]) throws {
     guard !processObjectIDs.isEmpty else { throw TapError.noAudioSession }
@@ -146,7 +151,13 @@ final class ProcessTapController {
       throw TapError.rejected(startStatus)
     }
 
-    sessions[appID] = Session(tapID: tapID, aggregateID: aggregateID, ioProcID: proc, frames: frames)
+    sessions[appID] = Session(
+      tapID: tapID,
+      aggregateID: aggregateID,
+      ioProcID: proc,
+      frames: frames,
+      processObjectIDs: processObjectIDs
+    )
     AgentLog.info("mute.active", fields: [
       "appID": appID,
       "tapID": Int(tapID),

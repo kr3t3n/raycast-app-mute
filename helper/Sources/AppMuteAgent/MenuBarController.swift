@@ -3,7 +3,7 @@ import Foundation
 
 /// Menu bar indicator for muted apps. macOS has no public API to badge another app's Dock icon.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject, NSMenuDelegate {
   static let shared = MenuBarController()
 
   private var statusItem: NSStatusItem?
@@ -15,11 +15,19 @@ final class MenuBarController {
 
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     if let button = item.button {
-      button.title = "♪"
+      if let image = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: "App Mute") {
+        image.isTemplate = true
+        button.image = image
+        button.title = ""
+      } else {
+        button.title = "🔇"
+      }
       button.toolTip = "App Mute"
+      button.appearsDisabled = false
     }
     statusItem = item
     reload()
+    AgentLog.info("menubar.start", fields: ["ok": statusItem != nil])
   }
 
   func setMuted(key: String, name: String) {
@@ -48,11 +56,18 @@ final class MenuBarController {
     let apps = sortedMuted
     let count = apps.count
 
-    statusItem.button?.title = count == 0 ? "♪" : "🔇\(count)"
-    statusItem.button?.toolTip = hoverText(for: apps)
+    if let button = statusItem.button {
+      if button.image != nil {
+        button.title = count == 0 ? "" : "\(count)"
+      } else {
+        button.title = count == 0 ? "♪" : "🔇\(count)"
+      }
+      button.toolTip = hoverText(for: apps)
+    }
 
     let menu = NSMenu()
     menu.autoenablesItems = false
+    menu.delegate = self
 
     if count == 0 {
       let empty = NSMenuItem(title: "Nothing muted", action: nil, keyEquivalent: "")
@@ -106,11 +121,17 @@ final class MenuBarController {
 
   @objc private func unmuteFromMenu(_ sender: NSMenuItem) {
     guard let key = sender.representedObject as? String else { return }
+    AgentLog.info("menubar.unmuteClick", fields: ["key": key])
     NotificationCenter.default.post(name: .appMuteUnmuteRequested, object: key)
   }
 
   @objc private func unmuteAllFromMenu() {
+    AgentLog.info("menubar.unmuteAllClick", fields: [:])
     NotificationCenter.default.post(name: .appMuteUnmuteAllRequested, object: nil)
+  }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    AgentLog.info("menubar.menuWillOpen", fields: ["count": mutedNames.count])
   }
 }
 
