@@ -5,12 +5,16 @@ struct Request: Codable {
   let operation: String
   let appID: String?
   let muted: Bool?
+  let path: String?
+  let bundleId: String?
 
   enum CodingKeys: String, CodingKey {
     case protocolVersion
     case operation
     case appID = "appId"
     case muted
+    case path
+    case bundleId
   }
 }
 

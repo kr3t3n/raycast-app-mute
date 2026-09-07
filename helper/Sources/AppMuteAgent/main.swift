@@ -35,6 +35,26 @@ func relatedPIDs(for app: RunningApp) -> Set<pid_t> {
   return pids
 }
 
+func findRunningApp(request: Request) -> RunningApp? {
+  let apps = AppDiscovery.runningApps()
+  let candidates = [request.appID, request.bundleId, request.path].compactMap { $0 }
+  for key in candidates {
+    if let match = apps.first(where: { $0.id == key || $0.bundleID == key || $0.path == key }) {
+      return match
+    }
+  }
+  // Soft match by case-insensitive name suffix when Raycast sends a path ending in .app
+  if let path = request.path ?? request.appID, path.hasSuffix(".app") {
+    let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+    return apps.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+  }
+  return nil
+}
+
+func registryKey(for app: RunningApp) -> String {
+  app.bundleID ?? app.id
+}
+
 func handle(_ request: Request) -> Data {
   guard request.protocolVersion == supportedProtocolVersion else {
     return try! JSONEncoder().encode(response("PROTOCOL_MISMATCH", "AppMuteAgent needs reinstalling."))
@@ -52,15 +72,16 @@ func handle(_ request: Request) -> Data {
 
   case "list":
     let apps = AppDiscovery.runningApps().map { app in
-      AppRecord(
-        id: app.id,
+      let key = registryKey(for: app)
+      return AppRecord(
+        id: key,
         name: app.name,
         bundleId: app.bundleID,
         path: app.path,
         executableName: app.executableName,
         running: true,
         hasAudio: false,
-        muted: registry.records[app.id] != nil,
+        muted: registry.records[key] != nil,
         iconPath: app.path
       )
     }
@@ -68,29 +89,31 @@ func handle(_ request: Request) -> Data {
     return try! JSONEncoder().encode(payload)
 
   case "set", "toggle":
-    guard let appID = request.appID, let app = AppDiscovery.runningApps().first(where: { $0.id == appID }) else {
+    guard let app = findRunningApp(request: request) else {
       return try! JSONEncoder().encode(response("NOT_RUNNING", "The app is not running."))
     }
-
-    let targetMuted = request.operation == "toggle" ? registry.records[appID] == nil : request.muted == true
+    let key = registryKey(for: app)
+    let targetMuted = request.operation == "toggle" ? registry.records[key] == nil : request.muted == true
 
     if !targetMuted {
-      runtime.taps.unmute(appID: appID)
-      let code = registry.set(appID, muted: false, processes: [], now: Date())
+      runtime.taps.unmute(appID: key)
+      let code = registry.set(key, muted: false, processes: [], now: Date())
       return try! JSONEncoder().encode(response(code, "Unmuted \(app.name)."))
     }
 
     let pids = relatedPIDs(for: app)
     let audioProcesses = ProcessTapController.processObjectIDs(matching: pids)
     do {
-      try runtime.taps.mute(appID: appID, processObjectIDs: audioProcesses)
-      let code = registry.set(appID, muted: true, processes: pids, now: Date())
+      try runtime.taps.mute(appID: key, processObjectIDs: audioProcesses)
+      let code = registry.set(key, muted: true, processes: pids, now: Date())
       if code == "ALREADY_MUTED" {
         return try! JSONEncoder().encode(response("ALREADY_MUTED", "\(app.name) is already muted."))
       }
       return try! JSONEncoder().encode(response("OK", "Muted \(app.name)."))
     } catch TapError.noAudioSession {
-      return try! JSONEncoder().encode(response("NO_AUDIO_SESSION", "\(app.name) has no audio session."))
+      return try! JSONEncoder().encode(
+        response("NO_AUDIO_SESSION", "\(app.name) has no audio session. Play sound in the app, then try again.")
+      )
     } catch {
       return try! JSONEncoder().encode(response("TAP_REJECTED", "macOS could not mute \(app.name)."))
     }

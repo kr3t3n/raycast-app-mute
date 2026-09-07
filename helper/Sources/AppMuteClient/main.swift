@@ -2,14 +2,15 @@ import Darwin
 import Foundation
 import AppMuteCore
 
-// Decodes one base64 JSON request, ensures AppMuteAgent is listening, sends the
-// request over the per-user control socket, and prints the JSON response.
+// Decodes one base64 JSON request, ensures AppMuteAgent is listening via launchd,
+// sends the request over the per-user control socket, and prints the JSON response.
 
 let supportDir = (NSHomeDirectory() as NSString)
   .appendingPathComponent("Library/Application Support/AppMute")
 let socketPath = (supportDir as NSString).appendingPathComponent("control.sock")
-let agentPath = (supportDir as NSString)
-  .appendingPathComponent("AppMuteAgent.app/Contents/MacOS/AppMuteAgent")
+let agentLabel = "gui/\(getuid())/com.kr3t3n.app-mute-agent"
+let launchAgentPlist = (NSHomeDirectory() as NSString)
+  .appendingPathComponent("Library/LaunchAgents/com.kr3t3n.app-mute-agent.plist")
 
 guard CommandLine.arguments.count == 2,
       let requestData = Data(base64Encoded: CommandLine.arguments[1])
@@ -33,19 +34,29 @@ func connectSocket() -> Int32? {
   return nil
 }
 
-func startAgentIfNeeded() {
+func runLaunchctl(_ arguments: [String]) {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+  process.arguments = arguments
+  process.standardOutput = FileHandle.nullDevice
+  process.standardError = FileHandle.nullDevice
+  try? process.run()
+  process.waitUntilExit()
+}
+
+func ensureAgent() {
   if let existing = connectSocket() {
     close(existing)
     return
   }
 
-  let process = Process()
-  process.executableURL = URL(fileURLWithPath: agentPath)
-  process.standardOutput = FileHandle.nullDevice
-  process.standardError = FileHandle.nullDevice
-  try? process.run()
+  if FileManager.default.fileExists(atPath: launchAgentPlist) {
+    runLaunchctl(["bootout", agentLabel])
+    runLaunchctl(["bootstrap", "gui/\(getuid())", launchAgentPlist])
+    runLaunchctl(["kickstart", "-k", agentLabel])
+  }
 
-  for _ in 0 ..< 50 {
+  for _ in 0 ..< 100 {
     Thread.sleep(forTimeInterval: 0.05)
     if let ready = connectSocket() {
       close(ready)
@@ -54,21 +65,32 @@ func startAgentIfNeeded() {
   }
 }
 
-startAgentIfNeeded()
+ensureAgent()
 
 guard let fd = connectSocket() else {
-  fputs("{\"code\":\"AGENT_UNAVAILABLE\",\"message\":\"AppMuteAgent could not start.\",\"data\":null}\n", stdout)
+  fputs(
+    "{\"code\":\"AGENT_UNAVAILABLE\",\"message\":\"AppMuteAgent could not start. Run npm run agent:build.\",\"data\":null}\n",
+    stdout
+  )
   exit(1)
 }
 
 _ = requestData.withUnsafeBytes { write(fd, $0.baseAddress, requestData.count) }
+shutdown(fd, SHUT_WR)
+
 var buffer = [UInt8](repeating: 0, count: 65_536)
 let count = read(fd, &buffer, buffer.count)
 close(fd)
 
 if count > 0 {
   FileHandle.standardOutput.write(Data(buffer.prefix(count)))
+  if buffer[count - 1] != UInt8(ascii: "\n") {
+    FileHandle.standardOutput.write(Data([UInt8(ascii: "\n")]))
+  }
 } else {
-  fputs("{\"code\":\"AGENT_UNAVAILABLE\",\"message\":\"AppMuteAgent returned no data.\",\"data\":null}\n", stdout)
+  fputs(
+    "{\"code\":\"AGENT_UNAVAILABLE\",\"message\":\"AppMuteAgent returned no data.\",\"data\":null}\n",
+    stdout
+  )
   exit(1)
 }

@@ -38,16 +38,23 @@ export function AppList({ mode, initialSearchText }: { mode: Mode; initialSearch
   const agentDown = data?.agent.code === "AGENT_UNAVAILABLE";
 
   async function act(app: AppRecord) {
-    const response = mode === "toggle" ? await toggleMuted(app) : await setMuted(app, mode === "mute");
-    if (["OK", "ALREADY_MUTED", "ALREADY_UNMUTED"].includes(response.code)) {
+    try {
+      const response = mode === "toggle" ? await toggleMuted(app) : await setMuted(app, mode === "mute");
+      if (["OK", "ALREADY_MUTED", "ALREADY_UNMUTED"].includes(response.code)) {
+        await showToast({
+          style: Toast.Style.Success,
+          title: response.message || `${mode === "unmute" ? "Unmuted" : "Muted"} ${app.name}`,
+        });
+        await revalidate();
+        if (preferences.closeAfterAction) await closeMainWindow();
+      } else {
+        await showToast({ style: Toast.Style.Failure, title: failureMessage(response, app.name) });
+      }
+    } catch (error) {
       await showToast({
-        style: Toast.Style.Success,
-        title: response.message || `${mode === "unmute" ? "Unmuted" : "Muted"} ${app.name}`,
+        style: Toast.Style.Failure,
+        title: error instanceof Error ? error.message : "Mute action failed.",
       });
-      if (preferences.closeAfterAction) await closeMainWindow();
-      else await revalidate();
-    } else {
-      await showToast({ style: Toast.Style.Failure, title: failureMessage(response, app.name) });
     }
   }
 
