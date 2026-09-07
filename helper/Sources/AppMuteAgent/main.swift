@@ -64,7 +64,8 @@ func handle(_ request: Request) -> Data {
         iconPath: app.path
       )
     }
-    return try! JSONEncoder().encode(Response(code: "OK", message: "OK", data: apps))
+    let payload: Response<[AppRecord]> = Response(code: "OK", message: "OK", data: apps)
+    return try! JSONEncoder().encode(payload)
 
   case "set", "toggle":
     guard let appID = request.appID, let app = AppDiscovery.runningApps().first(where: { $0.id == appID }) else {
