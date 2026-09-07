@@ -14,7 +14,8 @@
     "lint": "ray lint",
     "test": "vitest run",
     "agent:test": "cd helper && swift test",
-    "agent:build": "./helper/scripts/install.sh"
+    "agent:build": "./helper/scripts/install.sh",
+    "agent:diagnose": "./helper/scripts/diagnose.sh"
   },
   "dependencies": {
     "@raycast/api": "^1.96.0",

@@ -32,9 +32,12 @@ final class ProcessTapController {
 
   func mute(appID: String, processObjectIDs: [AudioObjectID]) throws {
     guard !processObjectIDs.isEmpty else { throw TapError.noAudioSession }
-    if sessions[appID] != nil { return }
+    // Always recreate. A stale session can report muted while audio still plays.
+    unmute(appID: appID)
 
     let tapUUID = UUID()
+    // Aggregate TapList must use this same UUID string — not kAudioTapPropertyUID.
+    let tapUID = tapUUID.uuidString
     let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
     description.uuid = tapUUID
     description.muteBehavior = .muted
@@ -44,14 +47,6 @@ final class ProcessTapController {
     var tapID = AudioObjectID(kAudioObjectUnknown)
     let tapStatus = AudioHardwareCreateProcessTap(description, &tapID)
     guard tapStatus == noErr else { throw TapError.rejected(tapStatus) }
-
-    let tapUID: String
-    do {
-      tapUID = try Self.readTapUID(tapID)
-    } catch {
-      AudioHardwareDestroyProcessTap(tapID)
-      throw error
-    }
 
     let outputUID: String
     do {
@@ -63,7 +58,7 @@ final class ProcessTapController {
 
     let aggregateDesc: [String: Any] = [
       kAudioAggregateDeviceNameKey: "AppMute Aggregate \(appID)",
-      kAudioAggregateDeviceUIDKey: "com.kr3t3n.app-mute.\(tapUUID.uuidString)",
+      kAudioAggregateDeviceUIDKey: "com.kr3t3n.app-mute.\(tapUID)",
       kAudioAggregateDeviceMainSubDeviceKey: outputUID,
       kAudioAggregateDeviceIsPrivateKey: true,
       kAudioAggregateDeviceIsStackedKey: false,
@@ -84,6 +79,12 @@ final class ProcessTapController {
     guard aggregateStatus == noErr else {
       AudioHardwareDestroyProcessTap(tapID)
       throw TapError.rejected(aggregateStatus)
+    }
+
+    guard Self.waitUntilAlive(aggregateID) else {
+      AudioHardwareDestroyAggregateDevice(aggregateID)
+      AudioHardwareDestroyProcessTap(tapID)
+      throw TapError.rejected(-2)
     }
 
     var ioProcID: AudioDeviceIOProcID?
@@ -139,11 +140,8 @@ final class ProcessTapController {
   }
 
   static func processObjectIDs(for app: RunningApp) -> [AudioObjectID] {
-    let matched = matches(for: app)
-    let active = matched.filter(\.isRunningOutput)
-    // Prefer processes that are currently outputting; fall back to every matched object.
-    let chosen = active.isEmpty ? matched : active
-    return chosen.map(\.objectID)
+    // Tap every matched object. Filtering to isRunningOutput alone can miss Electron helpers.
+    matches(for: app).map(\.objectID)
   }
 
   /// Core Audio process objects whose PID matches any of `pids`.
@@ -252,19 +250,22 @@ final class ProcessTapController {
     return running != 0
   }
 
-  private static func readTapUID(_ tapID: AudioObjectID) throws -> String {
+  private static func waitUntilAlive(_ deviceID: AudioObjectID, timeoutSeconds: TimeInterval = 2) -> Bool {
     var address = AudioObjectPropertyAddress(
-      mSelector: kAudioTapPropertyUID,
+      mSelector: kAudioDevicePropertyDeviceIsAlive,
       mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain
     )
-    var cfUID: Unmanaged<CFString>?
-    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-    let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &cfUID)
-    guard status == noErr, let unmanaged = cfUID else {
-      throw TapError.rejected(status)
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    while Date() < deadline {
+      var alive: UInt32 = 0
+      var size = UInt32(MemoryLayout<UInt32>.size)
+      if AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &alive) == noErr, alive == 1 {
+        return true
+      }
+      Thread.sleep(forTimeInterval: 0.05)
     }
-    return unmanaged.takeRetainedValue() as String
+    return false
   }
 
   private static func defaultOutputDeviceUID() throws -> String {

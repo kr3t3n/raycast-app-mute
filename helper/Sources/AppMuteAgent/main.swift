@@ -45,6 +45,15 @@ func findRunningApp(request: Request) -> RunningApp? {
     let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     return apps.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
   }
+  // Soft name match for diagnose/CLI (e.g. appId=ClickUp).
+  for key in candidates {
+    if let match = apps.first(where: { $0.name.caseInsensitiveCompare(key) == .orderedSame }) {
+      return match
+    }
+    if let match = apps.first(where: { $0.name.localizedCaseInsensitiveContains(key) }) {
+      return match
+    }
+  }
   return nil
 }
 
@@ -156,19 +165,18 @@ func handle(_ request: Request) -> Data {
     ])
 
     do {
+      // Clear prior registry state so a recreate reports OK, not ALREADY_MUTED.
+      _ = registry.set(key, muted: false, processes: [], now: Date())
       try runtime.taps.mute(appID: key, processObjectIDs: audioProcesses)
       let pids = Set(matches.map(\.pid))
       let code = registry.set(key, muted: true, processes: pids, now: Date())
-      if code == "ALREADY_MUTED" {
-        return try! JSONEncoder().encode(response("ALREADY_MUTED", "\(app.name) is already muted."))
-      }
       let message =
         "Muted \(app.name) (\(audioProcesses.count) audio process\(audioProcesses.count == 1 ? "" : "es"))."
       writeLastAction([
         "operation": "mute",
         "app": app.name,
         "key": key,
-        "code": "OK",
+        "code": code,
         "tappedObjectIDs": audioProcesses,
         "matchedCount": matches.count,
         "outputtingCount": matches.filter(\.isRunningOutput).count,
