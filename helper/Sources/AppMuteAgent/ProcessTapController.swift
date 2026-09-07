@@ -261,10 +261,10 @@ final class ProcessTapController {
     var cfUID: Unmanaged<CFString>?
     var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
     let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &cfUID)
-    guard status == noErr, let uid = cfUID?.takeRetainedValue() as String else {
+    guard status == noErr, let unmanaged = cfUID else {
       throw TapError.rejected(status)
     }
-    return uid
+    return unmanaged.takeRetainedValue() as String
   }
 
   private static func defaultOutputDeviceUID() throws -> String {
@@ -287,10 +287,10 @@ final class ProcessTapController {
     var cfUID: Unmanaged<CFString>?
     var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
     let uidStatus = AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, &cfUID)
-    guard uidStatus == noErr, let uid = cfUID?.takeRetainedValue() as String else {
+    guard uidStatus == noErr, let unmanaged = cfUID else {
       throw TapError.rejected(uidStatus)
     }
-    return uid
+    return unmanaged.takeRetainedValue() as String
   }
 }
 
