@@ -7,6 +7,9 @@ import AppMuteCore
 // ~/Library/Application Support/AppMute/control.sock (mode 0600, current uid).
 
 let registry = MuteRegistry()
+let supportDir = (NSHomeDirectory() as NSString)
+  .appendingPathComponent("Library/Application Support/AppMute")
+let lastActionPath = (supportDir as NSString).appendingPathComponent("last-action.json")
 
 @available(macOS 14.2, *)
 final class AgentRuntime {
@@ -22,17 +25,12 @@ func response(_ code: String, _ message: String) -> Response<String> {
   Response(code: code, message: message, data: nil)
 }
 
-func relatedPIDs(for app: RunningApp) -> Set<pid_t> {
-  var pids: Set<pid_t> = [app.pid]
-  if let bundleID = app.bundleID {
-    for other in NSWorkspace.shared.runningApplications {
-      guard let otherBundle = other.bundleIdentifier else { continue }
-      if otherBundle == bundleID || otherBundle.hasPrefix(bundleID + ".") {
-        pids.insert(other.processIdentifier)
-      }
-    }
-  }
-  return pids
+func writeLastAction(_ payload: [String: Any]) {
+  try? FileManager.default.createDirectory(atPath: supportDir, withIntermediateDirectories: true)
+  guard JSONSerialization.isValidJSONObject(payload),
+        let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+  else { return }
+  try? data.write(to: URL(fileURLWithPath: lastActionPath), options: .atomic)
 }
 
 func findRunningApp(request: Request) -> RunningApp? {
@@ -43,7 +41,6 @@ func findRunningApp(request: Request) -> RunningApp? {
       return match
     }
   }
-  // Soft match by case-insensitive name suffix when Raycast sends a path ending in .app
   if let path = request.path ?? request.appID, path.hasSuffix(".app") {
     let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     return apps.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
@@ -73,6 +70,7 @@ func handle(_ request: Request) -> Data {
   case "list":
     let apps = AppDiscovery.runningApps().map { app in
       let key = registryKey(for: app)
+      let matches = ProcessTapController.matches(for: app)
       return AppRecord(
         id: key,
         name: app.name,
@@ -80,7 +78,7 @@ func handle(_ request: Request) -> Data {
         path: app.path,
         executableName: app.executableName,
         running: true,
-        hasAudio: false,
+        hasAudio: matches.contains(where: \.isRunningOutput),
         muted: registry.records[key] != nil,
         iconPath: app.path
       )
@@ -88,8 +86,44 @@ func handle(_ request: Request) -> Data {
     let payload: Response<[AppRecord]> = Response(code: "OK", message: "OK", data: apps)
     return try! JSONEncoder().encode(payload)
 
+  case "diagnose":
+    guard let app = findRunningApp(request: request) else {
+      return try! JSONEncoder().encode(response("NOT_RUNNING", "The app is not running."))
+    }
+    let matches = ProcessTapController.matches(for: app)
+    let all = ProcessTapController.allAudioProcesses()
+    let body: [String: Any] = [
+      "app": [
+        "name": app.name,
+        "bundleId": app.bundleID as Any,
+        "path": app.path as Any,
+        "pid": app.pid,
+      ],
+      "matched": matches.map { match -> [String: Any] in
+        [
+          "objectID": match.objectID,
+          "pid": match.pid,
+          "path": match.path as Any,
+          "isRunningOutput": match.isRunningOutput,
+        ]
+      },
+      "allAudioProcesses": all.prefix(40).map { match -> [String: Any] in
+        [
+          "objectID": match.objectID,
+          "pid": match.pid,
+          "path": match.path as Any,
+          "isRunningOutput": match.isRunningOutput,
+        ]
+      },
+    ]
+    writeLastAction(["operation": "diagnose", "result": body])
+    let summary =
+      "\(app.name): \(matches.count) matched, \(matches.filter(\.isRunningOutput).count) outputting, \(all.count) total audio processes."
+    return try! JSONEncoder().encode(Response(code: "OK", message: summary, data: summary))
+
   case "set", "toggle":
     guard let app = findRunningApp(request: request) else {
+      writeLastAction(["operation": request.operation, "code": "NOT_RUNNING"])
       return try! JSONEncoder().encode(response("NOT_RUNNING", "The app is not running."))
     }
     let key = registryKey(for: app)
@@ -98,23 +132,60 @@ func handle(_ request: Request) -> Data {
     if !targetMuted {
       runtime.taps.unmute(appID: key)
       let code = registry.set(key, muted: false, processes: [], now: Date())
+      writeLastAction(["operation": "unmute", "app": app.name, "key": key, "code": code])
       return try! JSONEncoder().encode(response(code, "Unmuted \(app.name)."))
     }
 
-    let pids = relatedPIDs(for: app)
-    let audioProcesses = ProcessTapController.processObjectIDs(matching: pids)
+    let matches = ProcessTapController.matches(for: app)
+    let audioProcesses = ProcessTapController.processObjectIDs(for: app)
+    writeLastAction([
+      "operation": "mute",
+      "app": app.name,
+      "key": key,
+      "matchedCount": matches.count,
+      "outputtingCount": matches.filter(\.isRunningOutput).count,
+      "tappedObjectIDs": audioProcesses,
+      "matches": matches.map { match -> [String: Any] in
+        [
+          "objectID": match.objectID,
+          "pid": match.pid,
+          "path": match.path as Any,
+          "isRunningOutput": match.isRunningOutput,
+        ]
+      },
+    ])
+
     do {
       try runtime.taps.mute(appID: key, processObjectIDs: audioProcesses)
+      let pids = Set(matches.map(\.pid))
       let code = registry.set(key, muted: true, processes: pids, now: Date())
       if code == "ALREADY_MUTED" {
         return try! JSONEncoder().encode(response("ALREADY_MUTED", "\(app.name) is already muted."))
       }
-      return try! JSONEncoder().encode(response("OK", "Muted \(app.name)."))
+      let message =
+        "Muted \(app.name) (\(audioProcesses.count) audio process\(audioProcesses.count == 1 ? "" : "es"))."
+      writeLastAction([
+        "operation": "mute",
+        "app": app.name,
+        "key": key,
+        "code": "OK",
+        "tappedObjectIDs": audioProcesses,
+        "matchedCount": matches.count,
+        "outputtingCount": matches.filter(\.isRunningOutput).count,
+      ])
+      return try! JSONEncoder().encode(response("OK", message))
     } catch TapError.noAudioSession {
+      writeLastAction(["operation": "mute", "app": app.name, "code": "NO_AUDIO_SESSION", "matchedCount": matches.count])
       return try! JSONEncoder().encode(
         response("NO_AUDIO_SESSION", "\(app.name) has no audio session. Play sound in the app, then try again.")
       )
+    } catch TapError.rejected(let status) {
+      writeLastAction(["operation": "mute", "app": app.name, "code": "TAP_REJECTED", "status": status])
+      return try! JSONEncoder().encode(
+        response("TAP_REJECTED", "macOS could not mute \(app.name) (status \(status)).")
+      )
     } catch {
+      writeLastAction(["operation": "mute", "app": app.name, "code": "TAP_REJECTED"])
       return try! JSONEncoder().encode(response("TAP_REJECTED", "macOS could not mute \(app.name)."))
     }
 
