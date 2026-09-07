@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 
 /// Menu bar indicator for muted apps. macOS has no public API to badge another app's Dock icon.
-@MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
   static let shared = MenuBarController()
 
@@ -10,6 +9,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
   private var mutedNames: [String: String] = [:]
 
   func start() {
+    assert(Thread.isMainThread)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
@@ -31,18 +31,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
   }
 
   func setMuted(key: String, name: String) {
-    mutedNames[key] = name
-    reload()
+    let work = { [weak self] in
+      self?.mutedNames[key] = name
+      self?.reload()
+    }
+    if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
   }
 
   func setUnmuted(key: String) {
-    mutedNames.removeValue(forKey: key)
-    reload()
+    let work = { [weak self] in
+      self?.mutedNames.removeValue(forKey: key)
+      self?.reload()
+    }
+    if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
   }
 
   func clear() {
-    mutedNames.removeAll()
-    reload()
+    let work = { [weak self] in
+      self?.mutedNames.removeAll()
+      self?.reload()
+    }
+    if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
   }
 
   private var sortedMuted: [(key: String, name: String)] {
