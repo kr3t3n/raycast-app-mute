@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreAudio
 import Foundation
 
@@ -6,33 +7,85 @@ enum TapError: Error {
   case rejected(OSStatus)
 }
 
-/// Owns Core Audio process taps. Requires macOS 14.2+.
+/// Owns Core Audio process taps plus private aggregate devices. Requires macOS 14.2+.
+///
+/// Creating a tap with `muteBehavior = .muted` is not enough. Mute takes effect when the
+/// tap is attached to a private aggregate device (and kept alive). See Apple’s Core Audio
+/// taps sample and CATapMuteBehavior.
 @available(macOS 14.2, *)
 final class ProcessTapController {
-  private var tapIDs: [String: AudioObjectID] = [:]
+  private struct Session {
+    let tapID: AudioObjectID
+    let aggregateID: AudioObjectID
+    let ioProcID: AudioDeviceIOProcID?
+  }
+
+  private var sessions: [String: Session] = [:]
 
   func mute(appID: String, processObjectIDs: [AudioObjectID]) throws {
     guard !processObjectIDs.isEmpty else { throw TapError.noAudioSession }
-    if tapIDs[appID] != nil { return }
+    if sessions[appID] != nil { return }
 
+    let tapUUID = UUID()
     let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
+    description.uuid = tapUUID
     description.muteBehavior = .muted
     description.name = "AppMute \(appID)"
     description.isPrivate = true
 
     var tapID = AudioObjectID(kAudioObjectUnknown)
-    let status = AudioHardwareCreateProcessTap(description, &tapID)
-    guard status == noErr else { throw TapError.rejected(status) }
-    tapIDs[appID] = tapID
+    let tapStatus = AudioHardwareCreateProcessTap(description, &tapID)
+    guard tapStatus == noErr else { throw TapError.rejected(tapStatus) }
+
+    let aggregateDesc: [String: Any] = [
+      kAudioAggregateDeviceNameKey: "AppMute Aggregate \(appID)",
+      kAudioAggregateDeviceUIDKey: "com.kr3t3n.app-mute.\(tapUUID.uuidString)",
+      kAudioAggregateDeviceIsPrivateKey: true,
+      kAudioAggregateDeviceIsStackedKey: false,
+      kAudioAggregateDeviceTapAutoStartKey: true,
+      kAudioAggregateDeviceTapListKey: [
+        [
+          kAudioSubTapUIDKey: tapUUID.uuidString,
+          kAudioSubTapDriftCompensationKey: true,
+        ],
+      ],
+    ]
+
+    var aggregateID = AudioObjectID(kAudioObjectUnknown)
+    let aggregateStatus = AudioHardwareCreateAggregateDevice(aggregateDesc as CFDictionary, &aggregateID)
+    guard aggregateStatus == noErr else {
+      AudioHardwareDestroyProcessTap(tapID)
+      throw TapError.rejected(aggregateStatus)
+    }
+
+    // Discard samples. CATapMuted usually mutes as soon as the aggregate exists; starting
+    // a read also covers mute-when-tapped behavior and keeps the session active.
+    var ioProcID: AudioDeviceIOProcID?
+    let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil) { _, _, _, _, _ in }
+    if ioStatus == noErr, let proc = ioProcID {
+      if AudioDeviceStart(aggregateID, proc) != noErr {
+        AudioDeviceDestroyIOProcID(aggregateID, proc)
+        ioProcID = nil
+      }
+    } else {
+      ioProcID = nil
+    }
+
+    sessions[appID] = Session(tapID: tapID, aggregateID: aggregateID, ioProcID: ioProcID)
   }
 
   func unmute(appID: String) {
-    guard let tapID = tapIDs.removeValue(forKey: appID) else { return }
-    AudioHardwareDestroyProcessTap(tapID)
+    guard let session = sessions.removeValue(forKey: appID) else { return }
+    if let proc = session.ioProcID {
+      AudioDeviceStop(session.aggregateID, proc)
+      AudioDeviceDestroyIOProcID(session.aggregateID, proc)
+    }
+    AudioHardwareDestroyAggregateDevice(session.aggregateID)
+    AudioHardwareDestroyProcessTap(session.tapID)
   }
 
   func releaseAll() {
-    tapIDs.keys.forEach(unmute)
+    sessions.keys.forEach(unmute)
   }
 
   /// Core Audio process objects whose PID matches any of `pids`.
