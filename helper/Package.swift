@@ -15,7 +15,11 @@ let package = Package(
       dependencies: ["AppMuteCore"],
       path: "Sources/AppMuteAgent"
     ),
-    .executableTarget(name: "AppMuteClient", path: "Sources/AppMuteClient"),
+    .executableTarget(
+      name: "AppMuteClient",
+      dependencies: ["AppMuteCore"],
+      path: "Sources/AppMuteClient"
+    ),
     .testTarget(
       name: "AppMuteAgentTests",
       dependencies: ["AppMuteCore"],

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import AppMuteCore
 
 // Decodes one base64 JSON request, ensures AppMuteAgent is listening, sends the
 // request over the per-user control socket, and prints the JSON response.
@@ -21,16 +22,7 @@ func connectSocket() -> Int32? {
   let fd = socket(AF_UNIX, SOCK_STREAM, 0)
   guard fd >= 0 else { return nil }
 
-  var address = sockaddr_un()
-  address.sun_family = sa_family_t(AF_UNIX)
-  _ = socketPath.withCString { source in
-    withUnsafeMutablePointer(to: &address.sun_path) { destination in
-      destination.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: address.sun_path)) {
-        strncpy($0, source, MemoryLayout.size(ofValue: address.sun_path) - 1)
-      }
-    }
-  }
-
+  var address = UnixSocketAddress.make(path: socketPath)
   let length = socklen_t(MemoryLayout<sockaddr_un>.size)
   let ok = withUnsafePointer(to: &address) {
     $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, length) }
@@ -42,7 +34,10 @@ func connectSocket() -> Int32? {
 }
 
 func startAgentIfNeeded() {
-  if connectSocket() != nil { return }
+  if let existing = connectSocket() {
+    close(existing)
+    return
+  }
 
   let process = Process()
   process.executableURL = URL(fileURLWithPath: agentPath)
@@ -52,7 +47,10 @@ func startAgentIfNeeded() {
 
   for _ in 0 ..< 50 {
     Thread.sleep(forTimeInterval: 0.05)
-    if connectSocket() != nil { return }
+    if let ready = connectSocket() {
+      close(ready)
+      return
+    }
   }
 }
 

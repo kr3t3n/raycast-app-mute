@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import AppMuteCore
 
 final class SocketServer {
   private let handle: (Request) -> Data
@@ -20,16 +21,7 @@ final class SocketServer {
     let server = socket(AF_UNIX, SOCK_STREAM, 0)
     guard server >= 0 else { return }
 
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    _ = path.withCString { source in
-      withUnsafeMutablePointer(to: &address.sun_path) { destination in
-        destination.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: address.sun_path)) {
-          strncpy($0, source, MemoryLayout.size(ofValue: address.sun_path) - 1)
-        }
-      }
-    }
-
+    var address = UnixSocketAddress.make(path: path)
     let length = socklen_t(MemoryLayout<sockaddr_un>.size)
     guard withUnsafePointer(to: &address, {
       $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, length) }
