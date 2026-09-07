@@ -1,3 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.kr3t3n.app-mute-agent</string><key>CFBundleName</key><string>AppMuteAgent</string><key>CFBundleExecutable</key><string>AppMuteAgent</string><key>NSAudioCaptureUsageDescription</key><string>AppMuteAgent needs system audio access to mute selected apps.</string></dict></plist>
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.kr3t3n.app-mute-agent</string>
+  <key>CFBundleName</key>
+  <string>AppMuteAgent</string>
+  <key>CFBundleExecutable</key>
+  <string>AppMuteAgent</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>AppMuteAgent needs system audio access to mute selected apps.</string>
+</dict>
+</plist>

@@ -154,6 +154,9 @@ func handle(_ request: Request) -> Data {
       runtime.taps.unmute(appID: key)
       let code = registry.set(key, muted: false, processes: [], now: Date())
       writeLastAction(["operation": "unmute", "app": app.name, "key": key, "code": code])
+      DispatchQueue.main.async {
+        MenuBarController.shared.setUnmuted(key: key)
+      }
       return try! JSONEncoder().encode(response(code, "Unmuted \(app.name)."))
     }
 
@@ -193,6 +196,9 @@ func handle(_ request: Request) -> Data {
         "matchedCount": matches.count,
         "outputtingCount": matches.filter(\.isRunningOutput).count,
       ])
+      DispatchQueue.main.async {
+        MenuBarController.shared.setMuted(key: key, name: app.name)
+      }
       return try! JSONEncoder().encode(response("OK", message))
     } catch TapError.noAudioSession {
       writeLastAction(["operation": "mute", "app": app.name, "code": "NO_AUDIO_SESSION", "matchedCount": matches.count])
@@ -211,6 +217,12 @@ func handle(_ request: Request) -> Data {
 
   case "stop":
     runtime.taps.releaseAll()
+    for key in Array(registry.records.keys) {
+      _ = registry.set(key, muted: false, processes: [], now: Date())
+    }
+    DispatchQueue.main.async {
+      MenuBarController.shared.clear()
+    }
     return try! JSONEncoder().encode(response("OK", "Agent stopped."))
 
   default:
@@ -218,8 +230,47 @@ func handle(_ request: Request) -> Data {
   }
 }
 
+func unmuteKey(_ key: String) {
+  guard #available(macOS 14.2, *) else { return }
+  let runtime = AgentRuntimeHolder.shared
+  runtime.taps.unmute(appID: key)
+  _ = registry.set(key, muted: false, processes: [], now: Date())
+  DispatchQueue.main.async {
+    MenuBarController.shared.setUnmuted(key: key)
+  }
+  AgentLog.info("menu.unmute", fields: ["key": key])
+}
+
 AgentLog.info("agent.start", fields: [
   "pid": Int(getpid()),
   "macos": ProcessInfo.processInfo.operatingSystemVersionString,
 ])
-SocketServer(handle: handle).run()
+
+NotificationCenter.default.addObserver(
+  forName: .appMuteUnmuteRequested,
+  object: nil,
+  queue: nil
+) { note in
+  guard let key = note.object as? String else { return }
+  unmuteKey(key)
+}
+
+NotificationCenter.default.addObserver(
+  forName: .appMuteUnmuteAllRequested,
+  object: nil,
+  queue: nil
+) { _ in
+  for key in Array(registry.records.keys) {
+    unmuteKey(key)
+  }
+}
+
+DispatchQueue.global(qos: .userInitiated).async {
+  SocketServer(handle: handle).run()
+}
+
+DispatchQueue.main.async {
+  MenuBarController.shared.start()
+}
+
+RunLoop.main.run()
