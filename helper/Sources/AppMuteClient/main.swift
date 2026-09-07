@@ -5,6 +5,8 @@ import AppMuteCore
 // Decodes one base64 JSON request, ensures AppMuteAgent is listening via launchd,
 // sends the request over the per-user control socket, and prints the JSON response.
 
+signal(SIGPIPE, SIG_IGN)
+
 let supportDir = (NSHomeDirectory() as NSString)
   .appendingPathComponent("Library/Application Support/AppMute")
 let socketPath = (supportDir as NSString).appendingPathComponent("control.sock")
@@ -51,8 +53,6 @@ func ensureAgent() {
   }
 
   if FileManager.default.fileExists(atPath: launchAgentPlist) {
-    runLaunchctl(["bootout", agentLabel])
-    runLaunchctl(["bootstrap", "gui/\(getuid())", launchAgentPlist])
     runLaunchctl(["kickstart", "-k", agentLabel])
   }
 
@@ -65,6 +65,18 @@ func ensureAgent() {
   }
 }
 
+func readAll(from fd: Int32) -> Data {
+  var data = Data()
+  var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+  while true {
+    let count = read(fd, &buffer, buffer.count)
+    if count <= 0 { break }
+    data.append(contentsOf: buffer.prefix(count))
+    if data.count > 8_000_000 { break }
+  }
+  return data
+}
+
 ensureAgent()
 
 guard let fd = connectSocket() else {
@@ -75,16 +87,23 @@ guard let fd = connectSocket() else {
   exit(1)
 }
 
-_ = requestData.withUnsafeBytes { write(fd, $0.baseAddress, requestData.count) }
+_ = requestData.withUnsafeBytes { raw in
+  guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+  var offset = 0
+  while offset < requestData.count {
+    let written = write(fd, base.advanced(by: offset), requestData.count - offset)
+    if written <= 0 { break }
+    offset += written
+  }
+}
 shutdown(fd, SHUT_WR)
 
-var buffer = [UInt8](repeating: 0, count: 65_536)
-let count = read(fd, &buffer, buffer.count)
+let responseData = readAll(from: fd)
 close(fd)
 
-if count > 0 {
-  FileHandle.standardOutput.write(Data(buffer.prefix(count)))
-  if buffer[count - 1] != UInt8(ascii: "\n") {
+if !responseData.isEmpty {
+  FileHandle.standardOutput.write(responseData)
+  if responseData.last != UInt8(ascii: "\n") {
     FileHandle.standardOutput.write(Data([UInt8(ascii: "\n")]))
   }
 } else {

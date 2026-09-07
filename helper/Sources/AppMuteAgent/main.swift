@@ -87,9 +87,10 @@ func handle(_ request: Request) -> Data {
     return try! JSONEncoder().encode(Response(code: "OK", message: "Agent is ready.", data: "1"))
 
   case "list":
+    // Keep list cheap and small. Per-app Core Audio matching here was heavy and
+    // produced JSON large enough to truncate on the client.
     let apps = AppDiscovery.runningApps().map { app in
       let key = registryKey(for: app)
-      let matches = ProcessTapController.matches(for: app)
       return AppRecord(
         id: key,
         name: app.name,
@@ -97,9 +98,9 @@ func handle(_ request: Request) -> Data {
         path: app.path,
         executableName: app.executableName,
         running: true,
-        hasAudio: matches.contains(where: \.isRunningOutput),
+        hasAudio: false,
         muted: registry.records[key] != nil,
-        iconPath: app.path
+        iconPath: nil
       )
     }
     let payload: Response<[AppRecord]> = Response(code: "OK", message: "OK", data: apps)

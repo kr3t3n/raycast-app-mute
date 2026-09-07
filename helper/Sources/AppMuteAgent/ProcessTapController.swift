@@ -125,11 +125,10 @@ final class ProcessTapController {
     let frames = FrameCounter()
     var ioProcID: AudioDeviceIOProcID?
     let queue = DispatchQueue(label: "com.kr3t3n.app-mute.io.\(appID)")
-    let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { _, inInputData, _, _, _ in
-      let byteCount = Int(inInputData.pointee.mBuffers.mDataByteSize)
-      if byteCount > 0 {
-        frames.add(byteCount)
-      }
+    // Do not touch AudioBufferList contents here. A bad dereference on the IO
+    // thread kills the agent; launchd restarts it and every mute is lost.
+    let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { _, _, _, _, _ in
+      frames.add(1)
     }
     AgentLog.info("mute.createIOProc", fields: ["status": Int(ioStatus)])
     guard ioStatus == noErr, let proc = ioProcID else {

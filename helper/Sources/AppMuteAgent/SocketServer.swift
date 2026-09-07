@@ -12,6 +12,8 @@ final class SocketServer {
   }
 
   func run() {
+    signal(SIGPIPE, SIG_IGN)
+
     try? FileManager.default.createDirectory(
       atPath: (path as NSString).deletingLastPathComponent,
       withIntermediateDirectories: true
@@ -47,13 +49,45 @@ final class SocketServer {
         continue
       }
 
-      var bytes = [UInt8](repeating: 0, count: 65_536)
-      let count = read(client, &bytes, bytes.count)
-      if count > 0, let request = try? JSONDecoder().decode(Request.self, from: Data(bytes.prefix(count))) {
-        let result = handle(request)
-        _ = result.withUnsafeBytes { write(client, $0.baseAddress, result.count) }
+      autoreleasepool {
+        let requestData = readAll(from: client)
+        if !requestData.isEmpty,
+           let request = try? JSONDecoder().decode(Request.self, from: requestData)
+        {
+          let result = handle(request)
+          _ = writeAll(result, to: client)
+        }
       }
       close(client)
+    }
+  }
+
+  private func readAll(from fd: Int32) -> Data {
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+      let count = read(fd, &buffer, buffer.count)
+      if count <= 0 { break }
+      data.append(contentsOf: buffer.prefix(count))
+      if data.count > 1_000_000 { break }
+    }
+    return data
+  }
+
+  private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { raw in
+      guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return false }
+      var offset = 0
+      let total = data.count
+      while offset < total {
+        let written = write(fd, base.advanced(by: offset), total - offset)
+        if written <= 0 {
+          if errno == EINTR { continue }
+          return false
+        }
+        offset += written
+      }
+      return true
     }
   }
 }
