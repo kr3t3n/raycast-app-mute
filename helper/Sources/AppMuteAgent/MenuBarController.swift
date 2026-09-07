@@ -14,8 +14,10 @@ final class MenuBarController {
     app.setActivationPolicy(.accessory)
 
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    item.button?.title = "🔇"
-    item.button?.toolTip = "App Mute"
+    if let button = item.button {
+      button.title = "♪"
+      button.toolTip = "App Mute"
+    }
     statusItem = item
     reload()
   }
@@ -35,34 +37,71 @@ final class MenuBarController {
     reload()
   }
 
+  private var sortedMuted: [(key: String, name: String)] {
+    mutedNames
+      .map { (key: $0.key, name: $0.value) }
+      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+  }
+
   func reload() {
     guard let statusItem else { return }
-    let count = mutedNames.count
+    let apps = sortedMuted
+    let count = apps.count
+
     statusItem.button?.title = count == 0 ? "♪" : "🔇\(count)"
-    statusItem.button?.toolTip = count == 0 ? "App Mute — nothing muted" : "App Mute — \(count) muted"
+    statusItem.button?.toolTip = hoverText(for: apps)
 
     let menu = NSMenu()
+    menu.autoenablesItems = false
+
     if count == 0 {
-      menu.addItem(withTitle: "Nothing muted", action: nil, keyEquivalent: "")
+      let empty = NSMenuItem(title: "Nothing muted", action: nil, keyEquivalent: "")
+      empty.isEnabled = false
+      menu.addItem(empty)
     } else {
-      let header = NSMenuItem(title: "Muted apps", action: nil, keyEquivalent: "")
+      let header = NSMenuItem(title: "Muted — click to unmute", action: nil, keyEquivalent: "")
       header.isEnabled = false
       menu.addItem(header)
       menu.addItem(.separator())
-      for (key, name) in mutedNames.sorted(by: { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }) {
-        let item = NSMenuItem(title: "Unmute \(name)", action: #selector(unmuteFromMenu(_:)), keyEquivalent: "")
+
+      for app in apps {
+        let item = NSMenuItem(
+          title: app.name,
+          action: #selector(unmuteFromMenu(_:)),
+          keyEquivalent: ""
+        )
         item.target = self
-        item.representedObject = key
+        item.representedObject = app.key
+        item.isEnabled = true
+        item.toolTip = "Unmute \(app.name)"
         menu.addItem(item)
       }
+
       menu.addItem(.separator())
-      let unmuteAll = NSMenuItem(title: "Unmute All", action: #selector(unmuteAllFromMenu), keyEquivalent: "")
+      let unmuteAll = NSMenuItem(
+        title: "Unmute All",
+        action: #selector(unmuteAllFromMenu),
+        keyEquivalent: ""
+      )
       unmuteAll.target = self
+      unmuteAll.isEnabled = true
       menu.addItem(unmuteAll)
     }
+
     menu.addItem(.separator())
-    menu.addItem(withTitle: "App Mute Agent", action: nil, keyEquivalent: "").isEnabled = false
+    let footer = NSMenuItem(title: "App Mute", action: nil, keyEquivalent: "")
+    footer.isEnabled = false
+    menu.addItem(footer)
+
     statusItem.menu = menu
+  }
+
+  private func hoverText(for apps: [(key: String, name: String)]) -> String {
+    if apps.isEmpty {
+      return "App Mute — nothing muted"
+    }
+    let names = apps.map(\.name).joined(separator: "\n")
+    return "Muted:\n\(names)\n\nClick for menu"
   }
 
   @objc private func unmuteFromMenu(_ sender: NSMenuItem) {
