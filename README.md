@@ -1,31 +1,35 @@
 # Raycast App Mute
 
-Mute, unmute, or toggle audio for **one macOS app** from Raycast (not system-wide mute).
+Mute, unmute, or toggle audio for **one macOS app** from Raycast (not system mute).
+
+Public repo: https://github.com/kr3t3n/raycast-app-mute
 
 Example: open **Mute App**, type `cli`, select **ClickUp**.
 
-## Requirements
+Requires macOS 14.2+, Raycast, and Xcode Command Line Tools (to build the Swift agent).
 
-- macOS 14.2 or later
-- [Raycast](https://www.raycast.com/)
-- Xcode Command Line Tools (to build the Swift helper)
+## Install on your Mac
 
-## Install (developer mode)
+From the public clone (or this folder after you sync `claude-env`):
 
 ```sh
 git clone https://github.com/kr3t3n/raycast-app-mute.git
 cd raycast-app-mute
+# or: cd ~/claude-env/personal/projects/raycast-app-mute
+git pull
 npm install
-npm run agent:build    # installs AppMuteAgent under ~/Library/Application Support/AppMute/
-npm run dev            # loads the extension in Raycast developer mode
+npm run agent:build    # builds AppMuteAgent into ~/Library/Application Support/AppMute/
+npm run dev            # uses `ray develop` from @raycast/api
 ```
+
+Requires macOS 14.2+ (Sonoma). The Swift helper uses Core Audio process taps.
 
 Then in Raycast:
 
 1. Open **Extensions** and enable Developer Mode if needed.
 2. Confirm **App Mute** appears.
 3. Run **Mute App**, **Unmute App**, or **Toggle App Mute**.
-4. When macOS asks, allow **AppMuteAgent** to record system audio in **Privacy & Security**.
+4. When macOS asks, allow **AppMuteAgent** to record system audio (Privacy & Security).
 
 The optional **App name** argument only seeds the list filter. You must select a row. The command never mutes the first fuzzy match automatically.
 
@@ -37,11 +41,7 @@ The optional **App name** argument only seeds the list filter. You must select a
 | Unmute App | Unmute the selected app |
 | Toggle App Mute | Switch mute state for the selected app |
 
-## How it works
-
-Raycast talks to a local Swift agent over a user-only Unix socket. The agent uses Core Audio process taps (`CATapMuted`) so one app’s output is discarded without changing the system default device.
-
-## Development
+## Development (Mac)
 
 ```sh
 npm run lint
@@ -50,13 +50,11 @@ npm run build
 npm run agent:test
 ```
 
+`npm run agent:build` installs a user LaunchAgent and a mode `0600` control socket. It does not change the default audio output device.
+
 ## Layout
 
 - `src/` — Raycast commands and agent client
-- `helper/` — Swift `AppMuteAgent` + installer
-- `docs/architecture.md` — design notes
+- `helper/` — Swift AppMuteAgent + installer
+- `docs/architecture.md` — design contract
 - `icon.png` — extension icon
-
-## License
-
-MIT
