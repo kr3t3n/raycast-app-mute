@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import Darwin
 import Foundation
 import AppMuteCore
 
@@ -31,6 +32,7 @@ func writeLastAction(_ payload: [String: Any]) {
         let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
   else { return }
   try? data.write(to: URL(fileURLWithPath: lastActionPath), options: .atomic)
+  AgentLog.info("lastAction", fields: payload)
 }
 
 func findRunningApp(request: Request) -> RunningApp? {
@@ -62,6 +64,14 @@ func registryKey(for app: RunningApp) -> String {
 }
 
 func handle(_ request: Request) -> Data {
+  AgentLog.info("request", fields: [
+    "operation": request.operation,
+    "appId": request.appID as Any,
+    "bundleId": request.bundleId as Any,
+    "path": request.path as Any,
+    "muted": request.muted as Any,
+  ])
+
   guard request.protocolVersion == supportedProtocolVersion else {
     return try! JSONEncoder().encode(response("PROTOCOL_MISMATCH", "AppMuteAgent needs reinstalling."))
   }
@@ -108,6 +118,7 @@ func handle(_ request: Request) -> Data {
         "path": app.path as Any,
         "pid": app.pid,
       ],
+      "sessions": runtime.taps.activeSessionSummary(),
       "matched": matches.map { match -> [String: Any] in
         [
           "objectID": match.objectID,
@@ -206,4 +217,8 @@ func handle(_ request: Request) -> Data {
   }
 }
 
+AgentLog.info("agent.start", fields: [
+  "pid": Int(getpid()),
+  "macos": ProcessInfo.processInfo.operatingSystemVersionString,
+])
 SocketServer(handle: handle).run()

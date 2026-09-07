@@ -16,6 +16,23 @@ struct AudioProcessMatch: Equatable {
   let isRunningOutput: Bool
 }
 
+final class FrameCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+
+  func add(_ delta: Int) {
+    lock.lock()
+    value += delta
+    lock.unlock()
+  }
+
+  func snapshot() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
+}
+
 /// Owns Core Audio process taps plus private aggregate devices. Requires macOS 14.2+.
 ///
 /// Mute only takes effect when the tap is attached to a private aggregate built around the
@@ -26,6 +43,7 @@ final class ProcessTapController {
     let tapID: AudioObjectID
     let aggregateID: AudioObjectID
     let ioProcID: AudioDeviceIOProcID
+    let frames: FrameCounter
   }
 
   private var sessions: [String: Session] = [:]
@@ -44,13 +62,22 @@ final class ProcessTapController {
     description.name = "AppMute \(appID)"
     description.isPrivate = true
 
+    AgentLog.info("mute.begin", fields: [
+      "appID": appID,
+      "processObjectIDs": processObjectIDs.map { Int($0) },
+      "tapUID": tapUID,
+      "muteBehavior": description.muteBehavior.rawValue,
+    ])
+
     var tapID = AudioObjectID(kAudioObjectUnknown)
     let tapStatus = AudioHardwareCreateProcessTap(description, &tapID)
+    AgentLog.info("mute.createTap", fields: ["status": Int(tapStatus), "tapID": Int(tapID)])
     guard tapStatus == noErr else { throw TapError.rejected(tapStatus) }
 
     let outputUID: String
     do {
       outputUID = try Self.defaultOutputDeviceUID()
+      AgentLog.info("mute.defaultOutput", fields: ["outputUID": outputUID])
     } catch {
       AudioHardwareDestroyProcessTap(tapID)
       throw error
@@ -76,20 +103,35 @@ final class ProcessTapController {
 
     var aggregateID = AudioObjectID(kAudioObjectUnknown)
     let aggregateStatus = AudioHardwareCreateAggregateDevice(aggregateDesc as CFDictionary, &aggregateID)
+    AgentLog.info("mute.createAggregate", fields: [
+      "status": Int(aggregateStatus),
+      "aggregateID": Int(aggregateID),
+      "tapUID": tapUID,
+      "outputUID": outputUID,
+    ])
     guard aggregateStatus == noErr else {
       AudioHardwareDestroyProcessTap(tapID)
       throw TapError.rejected(aggregateStatus)
     }
 
-    guard Self.waitUntilAlive(aggregateID) else {
+    let alive = Self.waitUntilAlive(aggregateID)
+    AgentLog.info("mute.aggregateAlive", fields: ["alive": alive, "aggregateID": Int(aggregateID)])
+    guard alive else {
       AudioHardwareDestroyAggregateDevice(aggregateID)
       AudioHardwareDestroyProcessTap(tapID)
       throw TapError.rejected(-2)
     }
 
+    let frames = FrameCounter()
     var ioProcID: AudioDeviceIOProcID?
     let queue = DispatchQueue(label: "com.kr3t3n.app-mute.io.\(appID)")
-    let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { _, _, _, _, _ in }
+    let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { _, inInputData, _, _, _ in
+      let byteCount = Int(inInputData.pointee.mBuffers.mDataByteSize)
+      if byteCount > 0 {
+        frames.add(byteCount)
+      }
+    }
+    AgentLog.info("mute.createIOProc", fields: ["status": Int(ioStatus)])
     guard ioStatus == noErr, let proc = ioProcID else {
       AudioHardwareDestroyAggregateDevice(aggregateID)
       AudioHardwareDestroyProcessTap(tapID)
@@ -97,6 +139,7 @@ final class ProcessTapController {
     }
 
     let startStatus = AudioDeviceStart(aggregateID, proc)
+    AgentLog.info("mute.startIO", fields: ["status": Int(startStatus), "aggregateID": Int(aggregateID)])
     guard startStatus == noErr else {
       AudioDeviceDestroyIOProcID(aggregateID, proc)
       AudioHardwareDestroyAggregateDevice(aggregateID)
@@ -104,19 +147,55 @@ final class ProcessTapController {
       throw TapError.rejected(startStatus)
     }
 
-    sessions[appID] = Session(tapID: tapID, aggregateID: aggregateID, ioProcID: proc)
+    sessions[appID] = Session(tapID: tapID, aggregateID: aggregateID, ioProcID: proc, frames: frames)
+    AgentLog.info("mute.active", fields: [
+      "appID": appID,
+      "tapID": Int(tapID),
+      "aggregateID": Int(aggregateID),
+    ])
+
+    DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+      guard let self, let session = self.sessions[appID] else { return }
+      AgentLog.info("mute.io.sample", fields: [
+        "appID": appID,
+        "bytesIn1s": session.frames.snapshot(),
+        "tapID": Int(session.tapID),
+        "aggregateID": Int(session.aggregateID),
+      ])
+    }
   }
 
   func unmute(appID: String) {
-    guard let session = sessions.removeValue(forKey: appID) else { return }
+    guard let session = sessions.removeValue(forKey: appID) else {
+      AgentLog.info("unmute.noop", fields: ["appID": appID])
+      return
+    }
+    AgentLog.info("unmute.begin", fields: [
+      "appID": appID,
+      "bytesCaptured": session.frames.snapshot(),
+      "tapID": Int(session.tapID),
+      "aggregateID": Int(session.aggregateID),
+    ])
     AudioDeviceStop(session.aggregateID, session.ioProcID)
     AudioDeviceDestroyIOProcID(session.aggregateID, session.ioProcID)
     AudioHardwareDestroyAggregateDevice(session.aggregateID)
     AudioHardwareDestroyProcessTap(session.tapID)
+    AgentLog.info("unmute.done", fields: ["appID": appID])
   }
 
   func releaseAll() {
     sessions.keys.forEach(unmute)
+  }
+
+  func activeSessionSummary() -> [[String: Any]] {
+    sessions.map { key, session in
+      [
+        "appID": key,
+        "tapID": Int(session.tapID),
+        "aggregateID": Int(session.aggregateID),
+        "bytesCaptured": session.frames.snapshot(),
+      ]
+    }
   }
 
   /// Core Audio process objects that belong to the selected app (bundle helpers + path + parent chain).
