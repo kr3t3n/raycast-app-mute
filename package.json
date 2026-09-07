@@ -76,6 +76,8 @@
       "name": "candidateApps",
       "type": "dropdown",
       "title": "Candidate Apps",
+      "description": "Choose which apps appear in the mute list.",
+      "required": false,
       "default": "running",
       "data": [
         {
@@ -93,6 +95,8 @@
       "type": "checkbox",
       "title": "Include Background Apps",
       "label": "Include background apps",
+      "description": "Show background apps that have no normal window.",
+      "required": false,
       "default": false
     },
     {
@@ -100,6 +104,8 @@
       "type": "checkbox",
       "title": "Close After Action",
       "label": "Close Raycast after a successful action",
+      "description": "Close the Raycast window after mute, unmute, or toggle succeeds.",
+      "required": false,
       "default": true
     }
   ]
