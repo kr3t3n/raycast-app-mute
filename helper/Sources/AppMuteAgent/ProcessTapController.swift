@@ -79,25 +79,15 @@ final class ProcessTapController {
     AgentLog.info("mute.createTap", fields: ["status": Int(tapStatus), "tapID": Int(tapID)])
     guard tapStatus == noErr else { throw TapError.rejected(tapStatus) }
 
-    let outputUID: String
-    do {
-      outputUID = try Self.defaultOutputDeviceUID()
-      AgentLog.info("mute.defaultOutput", fields: ["outputUID": outputUID])
-    } catch {
-      AudioHardwareDestroyProcessTap(tapID)
-      throw error
-    }
-
+    // Tap-only private aggregate. Do NOT attach the default output device as a
+    // main/sub device — that couples mute IO to the hardware path and has left
+    // Chrome's audio service emitting silence after unmute on macOS 26.
     let aggregateDesc: [String: Any] = [
       kAudioAggregateDeviceNameKey: "AppMute Aggregate \(appID)",
       kAudioAggregateDeviceUIDKey: "com.kr3t3n.app-mute.\(tapUID)",
-      kAudioAggregateDeviceMainSubDeviceKey: outputUID,
       kAudioAggregateDeviceIsPrivateKey: true,
       kAudioAggregateDeviceIsStackedKey: false,
       kAudioAggregateDeviceTapAutoStartKey: true,
-      kAudioAggregateDeviceSubDeviceListKey: [
-        [kAudioSubDeviceUIDKey: outputUID],
-      ],
       kAudioAggregateDeviceTapListKey: [
         [
           kAudioSubTapUIDKey: tapUID,
@@ -112,7 +102,7 @@ final class ProcessTapController {
       "status": Int(aggregateStatus),
       "aggregateID": Int(aggregateID),
       "tapUID": tapUID,
-      "outputUID": outputUID,
+      "mode": "tap-only",
     ])
     guard aggregateStatus == noErr else {
       AudioHardwareDestroyProcessTap(tapID)
@@ -355,32 +345,6 @@ final class ProcessTapController {
       Thread.sleep(forTimeInterval: 0.05)
     }
     return false
-  }
-
-  private static func defaultOutputDeviceUID() throws -> String {
-    var deviceAddress = AudioObjectPropertyAddress(
-      mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var deviceID = AudioDeviceID(kAudioObjectUnknown)
-    var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-    let system = AudioObjectID(kAudioObjectSystemObject)
-    let deviceStatus = AudioObjectGetPropertyData(system, &deviceAddress, 0, nil, &deviceSize, &deviceID)
-    guard deviceStatus == noErr else { throw TapError.rejected(deviceStatus) }
-
-    var uidAddress = AudioObjectPropertyAddress(
-      mSelector: kAudioDevicePropertyDeviceUID,
-      mScope: kAudioObjectPropertyScopeGlobal,
-      mElement: kAudioObjectPropertyElementMain
-    )
-    var cfUID: Unmanaged<CFString>?
-    var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-    let uidStatus = AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, &cfUID)
-    guard uidStatus == noErr, let unmanaged = cfUID else {
-      throw TapError.rejected(uidStatus)
-    }
-    return unmanaged.takeRetainedValue() as String
   }
 }
 

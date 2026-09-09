@@ -15,6 +15,7 @@
     "test": "vitest run",
     "agent:test": "cd helper && swift test",
     "agent:build": "./helper/scripts/install.sh",
+    "agent:stop": "./helper/scripts/stop.sh",
     "agent:diagnose": "./helper/scripts/diagnose.sh"
   },
   "dependencies": {
